@@ -312,6 +312,7 @@ modules/codec/lpcm.c
 modules/codec/mad.c
 modules/codec/mft.c
 modules/codec/mpg123.c
+modules/codec/nvdec.c
 modules/codec/oggspots.c
 modules/codec/omxil/mediacodec.c
 modules/codec/omxil/omxil.c
