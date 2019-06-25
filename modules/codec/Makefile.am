@@ -438,12 +438,10 @@ codec_LTLIBRARIES += libd3d11va_plugin.la
 endif
 
 ### NVDEC ####
-
+if !HAVE_DARWIN
 libnvdec_plugin_la_SOURCES = codec/nvdec.c
-libnvdec_plugin_la_CFLAGS = $(AM_CFLAGS) -I/opt/cuda/include
-libnvdec_plugin_la_LIBADD = -lcuda -lnvcuvid
-
 codec_LTLIBRARIES += libnvdec_plugin.la
+endif
 
 ### OpenMAX ###
 
