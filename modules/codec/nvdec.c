@@ -27,6 +27,7 @@
 #include <vlc_common.h>
 #include <vlc_codec.h>
 #include <vlc_messages.h>
+#include <stdio.h>
 #include "nvcuvid.h"
 
 #define MAX_SURFACES 25
@@ -39,6 +40,7 @@ typedef struct nvdec_ctx {
 
 static int CUDAAPI HandleVideoSequence(void *p_opaque, CUVIDEOFORMAT *p_format)
 {
+    printf("NVDEC: HandleVideoSequence\n");
     decoder_t *p_dec = (decoder_t *) p_opaque;
     nvdec_ctx_t *p_ctx = p_dec->p_sys;
 
@@ -60,6 +62,7 @@ static int CUDAAPI HandleVideoSequence(void *p_opaque, CUVIDEOFORMAT *p_format)
 
     CUresult result = cuvidCreateDecoder(&p_ctx->cudecoder, &dparams);
 
+    printf("NVDEC: create decoder result - %d\n", result);
     if (result != CUDA_SUCCESS) {
         msg_Err(p_dec, "Could not create decoder object");
         return 0;
@@ -69,11 +72,13 @@ static int CUDAAPI HandleVideoSequence(void *p_opaque, CUVIDEOFORMAT *p_format)
 
 static int CUDAAPI HandlePictureDecode(void *p_opaque, CUVIDPICPARAMS *p_picparams)
 {
+    printf("NVDEC: HandlePictureDecode\n");
     decoder_t *p_dec = (decoder_t *) p_opaque;
     nvdec_ctx_t *p_ctx = p_dec->p_sys;
 
-    CUresult result = cuvidDecodePicture(&p_ctx->cudecoder, p_picparams);
+    CUresult result = cuvidDecodePicture(p_ctx->cudecoder, p_picparams);
 
+    printf("NVDEC: decode picture result - %d\n", result);
     if (result != CUDA_SUCCESS) {
         msg_Err(p_dec, "Could not create decoder object");
         return 0;
@@ -87,7 +92,6 @@ static int CUDAAPI HandlePictureDisplay(void *p_opaque, CUVIDPARSERDISPINFO *p_d
     nvdec_ctx_t *p_ctx = p_dec->p_sys;
 
     CUdeviceptr cu_frame = 0;
-    unsigned char *p_raw;
     unsigned int i_pitch;
     CUVIDPROCPARAMS params;
 
@@ -96,7 +100,7 @@ static int CUDAAPI HandlePictureDisplay(void *p_opaque, CUVIDPARSERDISPINFO *p_d
     params.top_field_first = p_dispinfo->top_field_first;
 
     // Map decoded frame to a device pointer
-    CUresult result = cuvidMapVideoFrame(&p_ctx->cudecoder, p_dispinfo->picture_index,
+    CUresult result = cuvidMapVideoFrame(p_ctx->cudecoder, p_dispinfo->picture_index,
                                          &cu_frame, &i_pitch, &params);
     if (result != CUDA_SUCCESS) {
         msg_Err(p_dec, "Could not map frame");
@@ -110,8 +114,8 @@ static int CUDAAPI HandlePictureDisplay(void *p_opaque, CUVIDPARSERDISPINFO *p_d
     p_pic->date = p_dispinfo->timestamp;
 
     int i_plane_offset = 0;
-    for (int plane = 0; plane < p_pic->i_planes; plane++) {
-        plane_t plane = p_pic->p[plane];
+    for (int i_plane = 0; i_plane < p_pic->i_planes; i_plane++) {
+        plane_t plane = p_pic->p[i_plane];
         CUDA_MEMCPY2D cu_cpy = {
             .srcMemoryType  = CU_MEMORYTYPE_DEVICE,
             .dstMemoryType  = CU_MEMORYTYPE_HOST,
@@ -130,13 +134,17 @@ static int CUDAAPI HandlePictureDisplay(void *p_opaque, CUVIDPARSERDISPINFO *p_d
         }
         i_plane_offset += cu_cpy.Height;
     }
-    
+
     // Release surface on GPU
-    result = cuvidUnmapVideoFrame(&p_ctx->cudecoder, &cu_frame);
+    result = cuvidUnmapVideoFrame(p_ctx->cudecoder, cu_frame);
     if (result != CUDA_SUCCESS) {
         msg_Err(p_dec, "Could not unmap frame");
         return 0;
     }
+
+    // Push decoded frame to display queue
+    decoder_QueueVideo(p_dec, p_pic);
+    printf("NVDEC: Queuing video frame pts %lld\n", p_pic->date);
     return 1;
 }
 
@@ -153,13 +161,13 @@ static int DecodeBlock(decoder_t *p_dec, block_t *p_block)
     cupacket.payload = p_block->p_buffer;
     cupacket.timestamp = p_block->i_pts;
 
-    CUresult result = cuvidParseVideoData(&p_ctx->cuparser, &cupacket);
+    CUresult result = cuvidParseVideoData(p_ctx->cuparser, &cupacket);
 
     if (result != CUDA_SUCCESS) {
         msg_Err(p_dec, "Could not send packet to NVDEC parser");
         return VLCDEC_ECRITICAL;
     } else {
-        msg_Err(p_dec, "Sent packet to NVDEC parser");
+        printf("NVDEC: Sent packet to parser\n");
     }
     return VLCDEC_SUCCESS;
 }
@@ -175,6 +183,7 @@ static int OpenDecoder(vlc_object_t *p_this)
     p_dec->p_sys = p_ctx;
     p_dec->pf_decode = DecodeBlock;
 
+    printf("NVDEC: input codec is %d\n", p_dec->fmt_in.i_codec);
     if (p_dec->fmt_in.i_codec != VLC_CODEC_H264)
         return VLC_EGENERIC;
 
@@ -182,12 +191,14 @@ static int OpenDecoder(vlc_object_t *p_this)
 
     CUVIDDECODECAPS caps = {0};
     caps.eCodecType         = cudaVideoCodec_H264;
-    caps.eChromaFormat      = cudaVideoSurfaceFormat_NV12;
+    caps.eChromaFormat      = cudaVideoChromaFormat_420;
     caps.nBitDepthMinus8    = p_dec->fmt_in.video.i_bits_per_pixel - 8;
     CUresult result = cuvidGetDecoderCaps(&caps);
+    printf("NVDEC: result - %d, caps.bIsSupported - %d\n", result, caps.bIsSupported);
     if (result != CUDA_SUCCESS || !caps.bIsSupported) {
         msg_Err(p_dec, "No hardware for NVDEC");
-        return VLC_EGENERIC;
+        /* Somehow my driver returns error 201 here but is able to do other nvdec calls */
+        //return VLC_EGENERIC;
     }
 
     p_ctx->i_nb_surface = MAX_SURFACES;
@@ -202,6 +213,7 @@ static int OpenDecoder(vlc_object_t *p_this)
     pparams.pfnDecodePicture        = HandlePictureDecode;
     pparams.pfnDisplayPicture       = HandlePictureDisplay;
     result = cuvidCreateVideoParser(&p_ctx->cuparser, &pparams);
+    printf("NVDEC: parser create result - %d\n", result);
     if (result != CUDA_SUCCESS) {
         msg_Err(p_dec, "Could not create parser object");
         return VLC_EGENERIC;
@@ -213,8 +225,8 @@ static void CloseDecoder(vlc_object_t *p_this)
 {
     decoder_t *p_dec = (decoder_t *) p_this;
     nvdec_ctx_t *p_ctx = p_dec->p_sys;
-    cuvidDestroyDecoder(&p_ctx->cudecoder);
-    cuvidDestroyVideoParser(&p_ctx->cuparser);
+    cuvidDestroyDecoder(p_ctx->cudecoder);
+    cuvidDestroyVideoParser(p_ctx->cuparser);
     free(p_ctx);
 }
 

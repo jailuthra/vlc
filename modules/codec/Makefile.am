@@ -441,10 +441,9 @@ endif
 
 libnvdec_plugin_la_SOURCES = codec/nvdec.c
 libnvdec_plugin_la_CFLAGS = $(AM_CFLAGS) -I/opt/cuda/include
-libnvdec_plugin_la_LIBADD = -lcuda -lcudart -lnvcuvid
+libnvdec_plugin_la_LIBADD = -lcuda -lnvcuvid
 
 codec_LTLIBRARIES += libnvdec_plugin.la
-EXTRA_LTLIBRARIES += libnvdec_plugin.la
 
 ### OpenMAX ###
 
