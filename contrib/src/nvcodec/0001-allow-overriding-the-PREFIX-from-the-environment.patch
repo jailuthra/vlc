@@ -1,0 +1,13 @@
+diff --git a/Makefile b/Makefile
+index a51c2c9..c3a9209 100644
+--- a/Makefile
++++ b/Makefile
+@@ -1,4 +1,4 @@
+-PREFIX = /usr/local
++PREFIX ?= /usr/local
+ LIBDIR = lib
+ INSTALL = install
+ SED = sed
+-- 
+2.19.1.windows.1
+
