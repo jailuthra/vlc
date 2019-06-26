@@ -27,7 +27,7 @@
 #include <vlc_common.h>
 #include <vlc_codec.h>
 #include <vlc_messages.h>
-#include <stdio.h>
+//#include <stdio.h>
 #include <ffnvcodec/dynlink_cuda.h>
 #include <ffnvcodec/dynlink_loader.h>
 
@@ -50,6 +50,7 @@ static int CUDAAPI HandleVideoSequence(void *p_opaque, CUVIDEOFORMAT *p_format)
     // post processed output's dimensions need to be 2-aligned in NVDEC
     p_dec->fmt_out.video.i_width = (p_format->coded_width + 1) & ~1;
     p_dec->fmt_out.video.i_height = (p_format->coded_height + 1) & ~1;
+    decoder_UpdateVideoFormat(p_dec);
 
     CUVIDDECODECREATEINFO dparams = {0};
     dparams.ulWidth             = p_format->coded_width;
@@ -91,8 +92,6 @@ static int CUDAAPI HandlePictureDisplay(void *p_opaque, CUVIDPARSERDISPINFO *p_d
     decoder_t *p_dec = (decoder_t *) p_opaque;
     nvdec_ctx_t *p_ctx = p_dec->p_sys;
 
-    printf("NVDEC: HandlePictureDisplay\n");
-
     CUdeviceptr cu_frame = 0;
     unsigned int i_pitch;
     CUVIDPROCPARAMS params;
@@ -115,9 +114,10 @@ static int CUDAAPI HandlePictureDisplay(void *p_opaque, CUVIDPARSERDISPINFO *p_d
     p_pic->b_top_field_first = params.top_field_first;
     p_pic->date = p_dispinfo->timestamp;
 
-    int i_plane_offset = 0;
+    int i_plane_offset = 0, height = 0;
     for (int i_plane = 0; i_plane < p_pic->i_planes; i_plane++) {
         plane_t plane = p_pic->p[i_plane];
+        height = p_dec->fmt_out.video.i_height >> ((i_plane) ? 1 : 0);
         CUDA_MEMCPY2D cu_cpy = {
             .srcMemoryType  = CU_MEMORYTYPE_DEVICE,
             .dstMemoryType  = CU_MEMORYTYPE_HOST,
@@ -127,7 +127,7 @@ static int CUDAAPI HandlePictureDisplay(void *p_opaque, CUVIDPARSERDISPINFO *p_d
             .dstHost        = plane.p_pixels,
             .dstPitch       = plane.i_pitch,
             .WidthInBytes   = __MIN(i_pitch, plane.i_pitch),
-            .Height         = plane.i_lines,
+            .Height         = height,
         };
         result = p_ctx->cudaFunctions->cuMemcpy2D(&cu_cpy);
         if (result != CUDA_SUCCESS) {
@@ -146,7 +146,7 @@ static int CUDAAPI HandlePictureDisplay(void *p_opaque, CUVIDPARSERDISPINFO *p_d
 
     // Push decoded frame to display queue
     decoder_QueueVideo(p_dec, p_pic);
-    printf("NVDEC: Queuing video frame pts %lld\n", p_pic->date);
+    //printf("NVDEC: Queuing video frame pts %lld\n", p_pic->date);
     return 1;
 }
 
@@ -198,6 +198,7 @@ static int OpenDecoder(vlc_object_t *p_this)
     }
 
     p_dec->fmt_out.i_codec = p_dec->fmt_out.video.i_chroma = VLC_CODEC_NV12;
+    decoder_UpdateVideoFormat(p_dec);
 
     CUVIDDECODECAPS caps = {0};
     caps.eCodecType         = cudaVideoCodec_H264;
