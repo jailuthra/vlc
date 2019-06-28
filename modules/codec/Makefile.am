@@ -439,7 +439,11 @@ endif
 
 ### NVDEC ####
 if !HAVE_DARWIN
-libnvdec_plugin_la_SOURCES = codec/nvdec.c
+libnvdec_plugin_la_SOURCES = \
+	codec/nvdec.c codec/hxxx_helper.c codec/hxxx_helper.h \
+	packetizer/hxxx_nal.h packetizer/hxxx_nal.c \
+	packetizer/h264_nal.c packetizer/h264_nal.h \
+	packetizer/hevc_nal.c packetizer/hevc_nal.h
 codec_LTLIBRARIES += libnvdec_plugin.la
 endif
 

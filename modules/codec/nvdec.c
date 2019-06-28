@@ -30,6 +30,7 @@
 //#include <stdio.h>
 #include <ffnvcodec/dynlink_cuda.h>
 #include <ffnvcodec/dynlink_loader.h>
+#include "hxxx_helper.h"
 
 #define MAX_SURFACES 25
 
@@ -39,6 +40,7 @@ typedef struct nvdec_ctx {
     CUcontext cuCtx;
     CUvideodecoder cudecoder;
     CUvideoparser cuparser;
+    struct hxxx_helper hh;
     int i_nb_surface;
 } nvdec_ctx_t;
 
@@ -158,10 +160,12 @@ static int DecodeBlock(decoder_t *p_dec, block_t *p_block)
         return VLCDEC_SUCCESS;
     }
 
+    block_t *p_annexB_block = p_ctx->hh.pf_process_block(&p_ctx->hh, p_block, NULL);
+
     CUVIDSOURCEDATAPACKET cupacket = {0};
-    cupacket.payload_size = p_block->i_buffer;
-    cupacket.payload = p_block->p_buffer;
-    cupacket.timestamp = p_block->i_pts;
+    cupacket.payload_size = p_annexB_block->i_buffer;
+    cupacket.payload = p_annexB_block->p_buffer;
+    cupacket.timestamp = p_annexB_block->i_pts;
 
     CUresult result =  p_ctx->functions->cuvidParseVideoData(p_ctx->cuparser, &cupacket);
 
@@ -221,12 +225,17 @@ static int OpenDecoder(vlc_object_t *p_this)
     pparams.pfnSequenceCallback     = HandleVideoSequence;
     pparams.pfnDecodePicture        = HandlePictureDecode;
     pparams.pfnDisplayPicture       = HandlePictureDisplay;
-    result =  p_ctx->functions->cuvidCreateVideoParser(&p_ctx->cuparser, &pparams);
+    result =  p_ctx->functions->cuvidCreateVideoParser(&p_ctx->cuparser,
+                                                       &pparams);
     if (result != CUDA_SUCCESS) {
         msg_Err(p_dec, "Could not create parser object");
         return VLC_EGENERIC;
     }
-    return VLC_SUCCESS;
+
+    hxxx_helper_init(&p_ctx->hh, VLC_OBJECT(p_dec),
+                     p_dec->fmt_in.i_codec, false);
+    return hxxx_helper_set_extra(&p_ctx->hh, p_dec->fmt_in.p_extra,
+                                             p_dec->fmt_in.i_extra) == VLC_SUCCESS;
 }
 
 static void CloseDecoder(vlc_object_t *p_this)
@@ -238,6 +247,7 @@ static void CloseDecoder(vlc_object_t *p_this)
     p_ctx->cudaFunctions->cuCtxPopCurrent(NULL);
     cuda_free_functions(&p_ctx->cudaFunctions);
     cuvid_free_functions(&p_ctx->functions);
+    hxxx_helper_clean(&p_ctx->hh);
     free(p_ctx);
 }
 
