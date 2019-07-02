@@ -42,6 +42,7 @@ typedef struct nvdec_ctx {
     CUvideoparser cuparser;
     struct hxxx_helper hh;
     int i_nb_surface;
+    bool b_spspps_pushed;
 } nvdec_ctx_t;
 
 static int CUDAAPI HandleVideoSequence(void *p_opaque, CUVIDEOFORMAT *p_format)
@@ -66,6 +67,7 @@ static int CUDAAPI HandleVideoSequence(void *p_opaque, CUVIDEOFORMAT *p_format)
     dparams.ulNumDecodeSurfaces = p_ctx->i_nb_surface;
     dparams.ulNumOutputSurfaces = 1;
 
+    p_ctx->cudaFunctions->cuCtxPushCurrent(p_ctx->cuCtx);
     CUresult result = p_ctx->functions->cuvidCreateDecoder(&p_ctx->cudecoder, &dparams);
 
     if (result != CUDA_SUCCESS) {
@@ -152,15 +154,9 @@ static int CUDAAPI HandlePictureDisplay(void *p_opaque, CUVIDPARSERDISPINFO *p_d
     return 1;
 }
 
-static int DecodeBlock(decoder_t *p_dec, block_t *p_block)
+static int CuvidPushBlock(decoder_t *p_dec, block_t *p_annexB_block)
 {
     nvdec_ctx_t *p_ctx = p_dec->p_sys;
-    if (p_block == NULL) {
-        // TODO flush
-        return VLCDEC_SUCCESS;
-    }
-
-    block_t *p_annexB_block = p_ctx->hh.pf_process_block(&p_ctx->hh, p_block, NULL);
 
     CUVIDSOURCEDATAPACKET cupacket = {0};
     cupacket.payload_size = p_annexB_block->i_buffer;
@@ -174,6 +170,27 @@ static int DecodeBlock(decoder_t *p_dec, block_t *p_block)
         return VLCDEC_ECRITICAL;
     }
     return VLCDEC_SUCCESS;
+}
+
+static int DecodeBlock(decoder_t *p_dec, block_t *p_block)
+{
+    nvdec_ctx_t *p_ctx = p_dec->p_sys;
+    if (p_block == NULL) {
+        // TODO flush
+        return VLCDEC_SUCCESS;
+    }
+
+    if (p_ctx->hh.b_is_xvcC && !p_ctx->b_spspps_pushed) {
+        block_t *p_spspps_blocks = h264_helper_get_annexb_config(&p_ctx->hh);
+        block_t *p_b;
+        for (p_b = p_spspps_blocks; p_b != NULL; p_b = p_b->p_next) {
+            CuvidPushBlock(p_dec, p_b);
+        }
+        p_ctx->b_spspps_pushed = 1;
+    }
+
+    block_t *p_annexB_block = p_ctx->hh.pf_process_block(&p_ctx->hh, p_block, NULL);
+    return CuvidPushBlock(p_dec, p_annexB_block);
 }
 
 static int OpenDecoder(vlc_object_t *p_this)
@@ -235,7 +252,7 @@ static int OpenDecoder(vlc_object_t *p_this)
     hxxx_helper_init(&p_ctx->hh, VLC_OBJECT(p_dec),
                      p_dec->fmt_in.i_codec, false);
     return hxxx_helper_set_extra(&p_ctx->hh, p_dec->fmt_in.p_extra,
-                                             p_dec->fmt_in.i_extra) == VLC_SUCCESS;
+                          p_dec->fmt_in.i_extra);
 }
 
 static void CloseDecoder(vlc_object_t *p_this)
