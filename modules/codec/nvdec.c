@@ -35,14 +35,16 @@
 #define MAX_SURFACES 25
 
 typedef struct nvdec_ctx {
-    CuvidFunctions *functions;
-    CudaFunctions  *cudaFunctions;
-    CUcontext cuCtx;
-    CUvideodecoder cudecoder;
-    CUvideoparser cuparser;
-    struct hxxx_helper hh;
-    int i_nb_surface;
-    bool b_spspps_pushed;
+    CuvidFunctions      *functions;
+    CudaFunctions       *cudaFunctions;
+    CUcontext           cuCtx;
+    CUvideodecoder      cudecoder;
+    CUvideoparser       cuparser;
+    CUVIDPARSERPARAMS   pparams;
+    struct hxxx_helper  hh;
+    bool                b_is_hxxx;
+    int                 i_nb_surface; ///<  number of GPU surfaces allocated
+    bool                b_xps_pushed; ///< (for xvcC) parameter sets pushed (SPS/PPS/VPS)
 } nvdec_ctx_t;
 
 static inline int CudaCheck(decoder_t *p_dec, CUresult result, const char *psz_func)
@@ -172,6 +174,27 @@ static int CuvidPushBlock(decoder_t *p_dec, block_t *p_block)
     return CUDA_CHECK(p_ctx->functions->cuvidParseVideoData(p_ctx->cuparser, &cupacket));
 }
 
+static block_t * HXXXProcessBlock(decoder_t *p_dec, block_t *p_block)
+{
+    nvdec_ctx_t *p_ctx = p_dec->p_sys;
+    if (p_ctx->hh.b_is_xvcC && !p_ctx->b_xps_pushed) {
+        block_t *p_xps_blocks;   // parameter set blocks (SPS/PPS/VPS)
+        if (p_dec->fmt_in.i_codec == VLC_CODEC_H264) {
+            p_xps_blocks = h264_helper_get_annexb_config(&p_ctx->hh);
+        } else if (p_dec->fmt_in.i_codec == VLC_CODEC_HEVC) {
+            p_xps_blocks = hevc_helper_get_annexb_config(&p_ctx->hh);
+        } else {
+            return NULL;
+        }
+        for (block_t *p_b = p_xps_blocks; p_b != NULL; p_b = p_b->p_next) {
+            CuvidPushBlock(p_dec, p_b);
+        }
+        p_ctx->b_xps_pushed = 1;
+    }
+
+    return p_ctx->hh.pf_process_block(&p_ctx->hh, p_block, NULL);
+}
+
 static int DecodeBlock(decoder_t *p_dec, block_t *p_block)
 {
     nvdec_ctx_t *p_ctx = p_dec->p_sys;
@@ -179,19 +202,19 @@ static int DecodeBlock(decoder_t *p_dec, block_t *p_block)
         // TODO flush
         return VLCDEC_SUCCESS;
     }
-
-    // FIXME: only for h26x
-    if (p_ctx->hh.b_is_xvcC && !p_ctx->b_spspps_pushed) {
-        block_t *p_spspps_blocks = h264_helper_get_annexb_config(&p_ctx->hh);
-        block_t *p_b;
-        for (p_b = p_spspps_blocks; p_b != NULL; p_b = p_b->p_next) {
-            CuvidPushBlock(p_dec, p_b);
-        }
-        p_ctx->b_spspps_pushed = 1;
+    if (p_ctx->b_is_hxxx) {
+        p_block = HXXXProcessBlock(p_dec, p_block);
     }
+    return CuvidPushBlock(p_dec, p_block);
+}
 
-    block_t *p_annexB_block = p_ctx->hh.pf_process_block(&p_ctx->hh, p_block, NULL);
-    return CuvidPushBlock(p_dec, p_annexB_block);
+static int MapCodecID(int i_vlc_fourcc)
+{
+    switch (i_vlc_fourcc) {
+        case VLC_CODEC_H264: return cudaVideoCodec_H264;
+        case VLC_CODEC_HEVC: return cudaVideoCodec_HEVC;
+    }
+    return -1;
 }
 
 static int OpenDecoder(vlc_object_t *p_this)
@@ -206,8 +229,20 @@ static int OpenDecoder(vlc_object_t *p_this)
     p_dec->p_sys = p_ctx;
     p_dec->pf_decode = DecodeBlock;
 
-    if (p_dec->fmt_in.i_codec != VLC_CODEC_H264)
-        return VLC_EGENERIC;
+    switch (p_dec->fmt_in.i_codec) {
+        case VLC_CODEC_H264:
+        case VLC_CODEC_HEVC:
+            p_ctx->b_is_hxxx = 1;
+            hxxx_helper_init(&p_ctx->hh, VLC_OBJECT(p_dec),
+                             p_dec->fmt_in.i_codec, false);
+            result = hxxx_helper_set_extra(&p_ctx->hh, p_dec->fmt_in.p_extra,
+                                           p_dec->fmt_in.i_extra);
+            if (result != VLC_SUCCESS)
+                return result;
+            break;
+        default:
+            return VLC_EGENERIC;
+    }
 
     cuvid_load_functions(&p_ctx->functions, NULL);
     cuda_load_functions(&p_ctx->cudaFunctions, NULL);
@@ -219,7 +254,7 @@ static int OpenDecoder(vlc_object_t *p_this)
         return result;
 
     CUVIDDECODECAPS caps = {0};
-    caps.eCodecType         = cudaVideoCodec_H264;
+    caps.eCodecType         = MapCodecID(p_dec->fmt_in.i_codec);
     caps.eChromaFormat      = cudaVideoChromaFormat_420;
     caps.nBitDepthMinus8    = 0;    // FIXME: hardcoded to 8-bit for now
     result =  CUDA_CHECK(p_ctx->functions->cuvidGetDecoderCaps(&caps));
@@ -235,36 +270,35 @@ static int OpenDecoder(vlc_object_t *p_this)
     // FIXME: use codec profile to figure this out
     p_ctx->i_nb_surface = MAX_SURFACES;
 
-    CUVIDPARSERPARAMS pparams = {0};
-    pparams.CodecType               = cudaVideoCodec_H264; // FIXME: find codec type from i_codec
-    pparams.ulClockRate             = 1e6;
-    pparams.ulMaxDisplayDelay       = 4;
-    pparams.ulMaxNumDecodeSurfaces  = p_ctx->i_nb_surface;
-    pparams.pUserData               = p_dec;
-    pparams.pfnSequenceCallback     = HandleVideoSequence;
-    pparams.pfnDecodePicture        = HandlePictureDecode;
-    pparams.pfnDisplayPicture       = HandlePictureDisplay;
-    result = CUDA_CHECK(p_ctx->functions->cuvidCreateVideoParser(&p_ctx->cuparser, &pparams));
+    p_ctx->pparams.CodecType               = MapCodecID(p_dec->fmt_in.i_codec);
+    p_ctx->pparams.ulClockRate             = 1e6;
+    p_ctx->pparams.ulMaxDisplayDelay       = 4;
+    p_ctx->pparams.ulMaxNumDecodeSurfaces  = p_ctx->i_nb_surface;
+    p_ctx->pparams.pUserData               = p_dec;
+    p_ctx->pparams.pfnSequenceCallback     = HandleVideoSequence;
+    p_ctx->pparams.pfnDecodePicture        = HandlePictureDecode;
+    p_ctx->pparams.pfnDisplayPicture       = HandlePictureDisplay;
+    result = CUDA_CHECK(p_ctx->functions->cuvidCreateVideoParser(&p_ctx->cuparser, &p_ctx->pparams));
     if (result != VLC_SUCCESS)
         return result;
 
-    // FIXME: Use this only for H26x
-    hxxx_helper_init(&p_ctx->hh, VLC_OBJECT(p_dec),
-                     p_dec->fmt_in.i_codec, false);
-    return hxxx_helper_set_extra(&p_ctx->hh, p_dec->fmt_in.p_extra,
-                          p_dec->fmt_in.i_extra);
+    return VLC_SUCCESS;
 }
 
 static void CloseDecoder(vlc_object_t *p_this)
 {
     decoder_t *p_dec = (decoder_t *) p_this;
     nvdec_ctx_t *p_ctx = p_dec->p_sys;
-    CUDA_CHECK(p_ctx->functions->cuvidDestroyDecoder(p_ctx->cudecoder));
-    CUDA_CHECK(p_ctx->functions->cuvidDestroyVideoParser(p_ctx->cuparser));
-    CUDA_CHECK(p_ctx->cudaFunctions->cuCtxDestroy(p_ctx->cuCtx));
+    if (p_ctx->cudecoder)
+        CUDA_CHECK(p_ctx->functions->cuvidDestroyDecoder(p_ctx->cudecoder));
+    if (p_ctx->cuparser)
+        CUDA_CHECK(p_ctx->functions->cuvidDestroyVideoParser(p_ctx->cuparser));
+    if (p_ctx->cuCtx)
+        CUDA_CHECK(p_ctx->cudaFunctions->cuCtxDestroy(p_ctx->cuCtx));
     cuda_free_functions(&p_ctx->cudaFunctions);
     cuvid_free_functions(&p_ctx->functions);
-    hxxx_helper_clean(&p_ctx->hh);
+    if (p_ctx->b_is_hxxx)
+        hxxx_helper_clean(&p_ctx->hh);
     free(p_ctx);
 }
 
