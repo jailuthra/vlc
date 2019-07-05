@@ -45,6 +45,21 @@ typedef struct nvdec_ctx {
     bool b_spspps_pushed;
 } nvdec_ctx_t;
 
+static inline int CudaCheck(decoder_t *p_dec, CUresult result, const char *psz_func)
+{
+    if (unlikely(result != CUDA_SUCCESS)) {
+        const char *psz_err;
+        nvdec_ctx_t *p_ctx = p_dec->p_sys;
+        p_ctx->cudaFunctions->cuGetErrorName(result, &psz_err);
+        msg_Err(p_dec, "%s: %s failed", psz_err, psz_func);
+        return VLC_EGENERIC;
+    } else {
+        return VLC_SUCCESS;
+    }
+}
+
+#define CUDA_CHECK(func) CudaCheck(p_dec, (func), #func)
+
 static int CUDAAPI HandleVideoSequence(void *p_opaque, CUVIDEOFORMAT *p_format)
 {
     decoder_t *p_dec = (decoder_t *) p_opaque;
@@ -67,14 +82,11 @@ static int CUDAAPI HandleVideoSequence(void *p_opaque, CUVIDEOFORMAT *p_format)
     dparams.ulNumDecodeSurfaces = p_ctx->i_nb_surface;
     dparams.ulNumOutputSurfaces = 1;
 
-    p_ctx->cudaFunctions->cuCtxPushCurrent(p_ctx->cuCtx);
-    CUresult result = p_ctx->functions->cuvidCreateDecoder(&p_ctx->cudecoder, &dparams);
+    CUDA_CHECK(p_ctx->cudaFunctions->cuCtxPushCurrent(p_ctx->cuCtx));
+    int result = CUDA_CHECK(p_ctx->functions->cuvidCreateDecoder(&p_ctx->cudecoder, &dparams));
+    CUDA_CHECK(p_ctx->cudaFunctions->cuCtxPopCurrent(NULL));
 
-    if (result != CUDA_SUCCESS) {
-        msg_Err(p_dec, "Could not create decoder object");
-        return 0;
-    }
-    return 1;
+    return !result;
 }
 
 static int CUDAAPI HandlePictureDecode(void *p_opaque, CUVIDPICPARAMS *p_picparams)
@@ -82,13 +94,11 @@ static int CUDAAPI HandlePictureDecode(void *p_opaque, CUVIDPICPARAMS *p_picpara
     decoder_t *p_dec = (decoder_t *) p_opaque;
     nvdec_ctx_t *p_ctx = p_dec->p_sys;
 
-    CUresult result =  p_ctx->functions->cuvidDecodePicture(p_ctx->cudecoder, p_picparams);
+    CUDA_CHECK(p_ctx->cudaFunctions->cuCtxPushCurrent(p_ctx->cuCtx));
+    int result =  CUDA_CHECK(p_ctx->functions->cuvidDecodePicture(p_ctx->cudecoder, p_picparams));
+    CUDA_CHECK(p_ctx->cudaFunctions->cuCtxPopCurrent(NULL));
 
-    if (result != CUDA_SUCCESS) {
-        msg_Err(p_dec, "Could not create decoder object");
-        return 0;
-    }
-    return 1;
+    return !result;
 }
 
 static int CUDAAPI HandlePictureDisplay(void *p_opaque, CUVIDPARSERDISPINFO *p_dispinfo)
@@ -96,6 +106,7 @@ static int CUDAAPI HandlePictureDisplay(void *p_opaque, CUVIDPARSERDISPINFO *p_d
     decoder_t *p_dec = (decoder_t *) p_opaque;
     nvdec_ctx_t *p_ctx = p_dec->p_sys;
 
+    CUDA_CHECK(p_ctx->cudaFunctions->cuCtxPushCurrent(p_ctx->cuCtx));
     CUdeviceptr cu_frame = 0;
     unsigned int i_pitch;
     CUVIDPROCPARAMS params;
@@ -105,12 +116,10 @@ static int CUDAAPI HandlePictureDisplay(void *p_opaque, CUVIDPARSERDISPINFO *p_d
     params.top_field_first = p_dispinfo->top_field_first;
 
     // Map decoded frame to a device pointer
-    CUresult result =  p_ctx->functions->cuvidMapVideoFrame(p_ctx->cudecoder, p_dispinfo->picture_index,
-                                         &cu_frame, &i_pitch, &params);
-    if (result != CUDA_SUCCESS) {
-        msg_Err(p_dec, "Could not map frame");
+    int result = CUDA_CHECK(p_ctx->functions->cuvidMapVideoFrame(p_ctx->cudecoder, p_dispinfo->picture_index,
+                                                                 &cu_frame, &i_pitch, &params));
+    if (result != VLC_SUCCESS)
         return 0;
-    }
 
     // Copy decoded frame into a new VLC picture
     picture_t * p_pic = decoder_NewPicture(p_dec);
@@ -130,23 +139,20 @@ static int CUDAAPI HandlePictureDisplay(void *p_opaque, CUVIDPARSERDISPINFO *p_d
             .srcPitch       = i_pitch,
             .dstHost        = plane.p_pixels,
             .dstPitch       = plane.i_pitch,
-            .WidthInBytes   = __MIN(i_pitch, plane.i_pitch),
+            .WidthInBytes   = __MIN(i_pitch, (size_t) plane.i_pitch),
             .Height         = height,
         };
-        result = p_ctx->cudaFunctions->cuMemcpy2D(&cu_cpy);
-        if (result != CUDA_SUCCESS) {
-            msg_Err(p_dec, "Could not copy frame to display memory");
+        result = CUDA_CHECK(p_ctx->cudaFunctions->cuMemcpy2D(&cu_cpy));
+        if (result != VLC_SUCCESS)
             return 0;
-        }
         i_plane_offset += cu_cpy.Height;
     }
 
     // Release surface on GPU
-    result =  p_ctx->functions->cuvidUnmapVideoFrame(p_ctx->cudecoder, cu_frame);
-    if (result != CUDA_SUCCESS) {
-        msg_Err(p_dec, "Could not unmap frame");
+    result = CUDA_CHECK(p_ctx->functions->cuvidUnmapVideoFrame(p_ctx->cudecoder, cu_frame));
+    if (result != VLC_SUCCESS)
         return 0;
-    }
+    CUDA_CHECK(p_ctx->cudaFunctions->cuCtxPopCurrent(NULL));
 
     // Push decoded frame to display queue
     decoder_QueueVideo(p_dec, p_pic);
@@ -154,22 +160,16 @@ static int CUDAAPI HandlePictureDisplay(void *p_opaque, CUVIDPARSERDISPINFO *p_d
     return 1;
 }
 
-static int CuvidPushBlock(decoder_t *p_dec, block_t *p_annexB_block)
+static int CuvidPushBlock(decoder_t *p_dec, block_t *p_block)
 {
     nvdec_ctx_t *p_ctx = p_dec->p_sys;
 
     CUVIDSOURCEDATAPACKET cupacket = {0};
-    cupacket.payload_size = p_annexB_block->i_buffer;
-    cupacket.payload = p_annexB_block->p_buffer;
-    cupacket.timestamp = p_annexB_block->i_pts;
+    cupacket.payload_size = p_block->i_buffer;
+    cupacket.payload = p_block->p_buffer;
+    cupacket.timestamp = p_block->i_pts;
 
-    CUresult result =  p_ctx->functions->cuvidParseVideoData(p_ctx->cuparser, &cupacket);
-
-    if (result != CUDA_SUCCESS) {
-        msg_Err(p_dec, "Could not send packet to NVDEC parser");
-        return VLCDEC_ECRITICAL;
-    }
-    return VLCDEC_SUCCESS;
+    return CUDA_CHECK(p_ctx->functions->cuvidParseVideoData(p_ctx->cuparser, &cupacket));
 }
 
 static int DecodeBlock(decoder_t *p_dec, block_t *p_block)
@@ -180,6 +180,7 @@ static int DecodeBlock(decoder_t *p_dec, block_t *p_block)
         return VLCDEC_SUCCESS;
     }
 
+    // FIXME: only for h26x
     if (p_ctx->hh.b_is_xvcC && !p_ctx->b_spspps_pushed) {
         block_t *p_spspps_blocks = h264_helper_get_annexb_config(&p_ctx->hh);
         block_t *p_b;
@@ -197,11 +198,11 @@ static int OpenDecoder(vlc_object_t *p_this)
 {
     decoder_t *p_dec = (decoder_t *) p_this;
     nvdec_ctx_t *p_ctx;
-    CUresult result;
+    int result;
     p_ctx = calloc(1, sizeof(*p_ctx));
-    if (!p_ctx) {
+    if (!p_ctx)
         return VLC_ENOMEM;
-    }
+
     p_dec->p_sys = p_ctx;
     p_dec->pf_decode = DecodeBlock;
 
@@ -210,31 +211,32 @@ static int OpenDecoder(vlc_object_t *p_this)
 
     cuvid_load_functions(&p_ctx->functions, NULL);
     cuda_load_functions(&p_ctx->cudaFunctions, NULL);
-    p_ctx->cudaFunctions->cuInit(0);
-    p_ctx->cudaFunctions->cuCtxCreate(&p_ctx->cuCtx, 0, 0);
-    result = p_ctx->cudaFunctions->cuCtxPushCurrent(p_ctx->cuCtx);
-    if (result != CUDA_SUCCESS) {
-        msg_Err(p_dec, "Could not push CUDA context");
-        return VLC_EGENERIC;
-    }
+    CUDA_CHECK(p_ctx->cudaFunctions->cuInit(0));
+    CUDA_CHECK(p_ctx->cudaFunctions->cuCtxCreate(&p_ctx->cuCtx, 0, 0));
 
-    p_dec->fmt_out.i_codec = p_dec->fmt_out.video.i_chroma = VLC_CODEC_NV12;
-    decoder_UpdateVideoFormat(p_dec);
+    result = CUDA_CHECK(p_ctx->cudaFunctions->cuCtxPushCurrent(p_ctx->cuCtx));
+    if (result != VLC_SUCCESS)
+        return result;
 
     CUVIDDECODECAPS caps = {0};
     caps.eCodecType         = cudaVideoCodec_H264;
     caps.eChromaFormat      = cudaVideoChromaFormat_420;
     caps.nBitDepthMinus8    = 0;    // FIXME: hardcoded to 8-bit for now
-    result =  p_ctx->functions->cuvidGetDecoderCaps(&caps);
-    if (result != CUDA_SUCCESS || !caps.bIsSupported) {
+    result =  CUDA_CHECK(p_ctx->functions->cuvidGetDecoderCaps(&caps));
+    if (result != VLC_SUCCESS || !caps.bIsSupported) {
         msg_Err(p_dec, "No hardware for NVDEC");
         return VLC_EGENERIC;
     }
+    CUDA_CHECK(p_ctx->cudaFunctions->cuCtxPopCurrent(NULL));
 
+    p_dec->fmt_out.i_codec = p_dec->fmt_out.video.i_chroma = VLC_CODEC_NV12; // FIXME: use input chroma format to find best possible output
+    decoder_UpdateVideoFormat(p_dec);
+
+    // FIXME: use codec profile to figure this out
     p_ctx->i_nb_surface = MAX_SURFACES;
 
     CUVIDPARSERPARAMS pparams = {0};
-    pparams.CodecType               = cudaVideoCodec_H264;
+    pparams.CodecType               = cudaVideoCodec_H264; // FIXME: find codec type from i_codec
     pparams.ulClockRate             = 1e6;
     pparams.ulMaxDisplayDelay       = 4;
     pparams.ulMaxNumDecodeSurfaces  = p_ctx->i_nb_surface;
@@ -242,13 +244,11 @@ static int OpenDecoder(vlc_object_t *p_this)
     pparams.pfnSequenceCallback     = HandleVideoSequence;
     pparams.pfnDecodePicture        = HandlePictureDecode;
     pparams.pfnDisplayPicture       = HandlePictureDisplay;
-    result =  p_ctx->functions->cuvidCreateVideoParser(&p_ctx->cuparser,
-                                                       &pparams);
-    if (result != CUDA_SUCCESS) {
-        msg_Err(p_dec, "Could not create parser object");
-        return VLC_EGENERIC;
-    }
+    result = CUDA_CHECK(p_ctx->functions->cuvidCreateVideoParser(&p_ctx->cuparser, &pparams));
+    if (result != VLC_SUCCESS)
+        return result;
 
+    // FIXME: Use this only for H26x
     hxxx_helper_init(&p_ctx->hh, VLC_OBJECT(p_dec),
                      p_dec->fmt_in.i_codec, false);
     return hxxx_helper_set_extra(&p_ctx->hh, p_dec->fmt_in.p_extra,
@@ -259,9 +259,9 @@ static void CloseDecoder(vlc_object_t *p_this)
 {
     decoder_t *p_dec = (decoder_t *) p_this;
     nvdec_ctx_t *p_ctx = p_dec->p_sys;
-    p_ctx->functions->cuvidDestroyDecoder(p_ctx->cudecoder);
-    p_ctx->functions->cuvidDestroyVideoParser(p_ctx->cuparser);
-    p_ctx->cudaFunctions->cuCtxPopCurrent(NULL);
+    CUDA_CHECK(p_ctx->functions->cuvidDestroyDecoder(p_ctx->cudecoder));
+    CUDA_CHECK(p_ctx->functions->cuvidDestroyVideoParser(p_ctx->cuparser));
+    CUDA_CHECK(p_ctx->cudaFunctions->cuCtxDestroy(p_ctx->cuCtx));
     cuda_free_functions(&p_ctx->cudaFunctions);
     cuvid_free_functions(&p_ctx->functions);
     hxxx_helper_clean(&p_ctx->hh);
