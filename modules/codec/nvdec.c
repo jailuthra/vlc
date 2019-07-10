@@ -171,6 +171,7 @@ static int CuvidPushBlock(decoder_t *p_dec, block_t *p_block)
     cupacket.payload = p_block->p_buffer;
     cupacket.timestamp = p_block->i_pts;
 
+    printf("payload_size %d, pts %d\n", cupacket.payload_size, cupacket.timestamp);
     return CUDA_CHECK(p_ctx->functions->cuvidParseVideoData(p_ctx->cuparser, &cupacket));
 }
 
@@ -213,6 +214,8 @@ static int MapCodecID(int i_vlc_fourcc)
     switch (i_vlc_fourcc) {
         case VLC_CODEC_H264: return cudaVideoCodec_H264;
         case VLC_CODEC_HEVC: return cudaVideoCodec_HEVC;
+        case VLC_CODEC_VP8:  return cudaVideoCodec_VP8;
+        case VLC_CODEC_VP9:  return cudaVideoCodec_VP9;
     }
     return -1;
 }
@@ -240,6 +243,9 @@ static int OpenDecoder(vlc_object_t *p_this)
             if (result != VLC_SUCCESS)
                 return result;
             break;
+        case VLC_CODEC_VP8:
+        case VLC_CODEC_VP9:
+            return VLC_SUCCESS;
         default:
             return VLC_EGENERIC;
     }
