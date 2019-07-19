@@ -35,16 +35,18 @@
 #define MAX_SURFACES 25
 
 typedef struct nvdec_ctx {
-    CuvidFunctions      *functions;
-    CudaFunctions       *cudaFunctions;
-    CUcontext           cuCtx;
-    CUvideodecoder      cudecoder;
-    CUvideoparser       cuparser;
-    CUVIDPARSERPARAMS   pparams;
-    struct hxxx_helper  hh;
-    bool                b_is_hxxx;
-    int                 i_nb_surface; ///<  number of GPU surfaces allocated
-    bool                b_xps_pushed; ///< (for xvcC) parameter sets pushed (SPS/PPS/VPS)
+    CuvidFunctions              *functions;
+    CudaFunctions               *cudaFunctions;
+    CUcontext                   cuCtx;
+    CUvideodecoder              cudecoder;
+    CUvideoparser               cuparser;
+    CUVIDPARSERPARAMS           pparams;
+    struct hxxx_helper          hh;
+    bool                        b_is_hxxx;
+    int                         i_nb_surface; ///<  number of GPU surfaces allocated
+    bool                        b_xps_pushed; ///< (for xvcC) parameter sets pushed (SPS/PPS/VPS)
+    bool                        b_progressive;
+    cudaVideoDeinterlaceMode    deintMode;
 } nvdec_ctx_t;
 
 static inline int CudaCheck(decoder_t *p_dec, CUresult result, const char *psz_func)
@@ -83,6 +85,7 @@ static int CUDAAPI HandleVideoSequence(void *p_opaque, CUVIDEOFORMAT *p_format)
     dparams.ChromaFormat        = p_format->chroma_format;
     dparams.ulNumDecodeSurfaces = p_ctx->i_nb_surface;
     dparams.ulNumOutputSurfaces = 1;
+    dparams.DeinterlaceMode     = p_ctx->deintMode;
 
     CUDA_CHECK(p_ctx->cudaFunctions->cuCtxPushCurrent(p_ctx->cuCtx));
     int result = CUDA_CHECK(p_ctx->functions->cuvidCreateDecoder(&p_ctx->cudecoder, &dparams));
@@ -114,7 +117,7 @@ static int CUDAAPI HandlePictureDisplay(void *p_opaque, CUVIDPARSERDISPINFO *p_d
     CUVIDPROCPARAMS params;
 
     memset(&params, 0, sizeof(params));
-    params.progressive_frame = p_dispinfo->progressive_frame;
+    params.progressive_frame = p_ctx->b_progressive;
     params.top_field_first = p_dispinfo->top_field_first;
 
     // Map decoded frame to a device pointer
@@ -171,7 +174,6 @@ static int CuvidPushBlock(decoder_t *p_dec, block_t *p_block)
     cupacket.payload = p_block->p_buffer;
     cupacket.timestamp = p_block->i_pts;
 
-    printf("payload_size %d, pts %d\n", cupacket.payload_size, cupacket.timestamp);
     return CUDA_CHECK(p_ctx->functions->cuvidParseVideoData(p_ctx->cuparser, &cupacket));
 }
 
@@ -274,7 +276,9 @@ static int OpenDecoder(vlc_object_t *p_this)
     decoder_UpdateVideoFormat(p_dec);
 
     // FIXME: use codec profile to figure this out
-    p_ctx->i_nb_surface = MAX_SURFACES;
+    p_ctx->i_nb_surface     = MAX_SURFACES;
+    p_ctx->b_progressive    = 1;
+    p_ctx->deintMode        = cudaVideoDeinterlaceMode_Weave;
 
     p_ctx->pparams.CodecType               = MapCodecID(p_dec->fmt_in.i_codec);
     p_ctx->pparams.ulClockRate             = 1e6;
