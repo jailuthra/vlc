@@ -27,7 +27,6 @@
 #include <vlc_common.h>
 #include <vlc_codec.h>
 #include <vlc_messages.h>
-//#include <stdio.h>
 #include <ffnvcodec/dynlink_cuda.h>
 #include <ffnvcodec/dynlink_loader.h>
 #include "hxxx_helper.h"
@@ -161,7 +160,6 @@ static int CUDAAPI HandlePictureDisplay(void *p_opaque, CUVIDPARSERDISPINFO *p_d
 
     // Push decoded frame to display queue
     decoder_QueueVideo(p_dec, p_pic);
-    //printf("NVDEC: Queuing video frame pts %lld\n", p_pic->date);
     return 1;
 }
 
@@ -170,6 +168,7 @@ static int CuvidPushBlock(decoder_t *p_dec, block_t *p_block)
     nvdec_ctx_t *p_ctx = p_dec->p_sys;
 
     CUVIDSOURCEDATAPACKET cupacket = {0};
+    cupacket.flags |= CUVID_PKT_TIMESTAMP;
     cupacket.payload_size = p_block->i_buffer;
     cupacket.payload = p_block->p_buffer;
     cupacket.timestamp = p_block->i_pts;
