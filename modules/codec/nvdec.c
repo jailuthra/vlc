@@ -171,7 +171,7 @@ static int CuvidPushBlock(decoder_t *p_dec, block_t *p_block)
     cupacket.flags |= CUVID_PKT_TIMESTAMP;
     cupacket.payload_size = p_block->i_buffer;
     cupacket.payload = p_block->p_buffer;
-    cupacket.timestamp = p_block->i_pts;
+    cupacket.timestamp = p_block->i_pts == VLC_TICK_INVALID ? p_block->i_dts : p_block->i_pts;
 
     return CUDA_CHECK(p_ctx->functions->cuvidParseVideoData(p_ctx->cuparser, &cupacket));
 }
@@ -280,7 +280,7 @@ static int OpenDecoder(vlc_object_t *p_this)
     p_ctx->deintMode        = cudaVideoDeinterlaceMode_Weave;
 
     p_ctx->pparams.CodecType               = MapCodecID(p_dec->fmt_in.i_codec);
-    p_ctx->pparams.ulClockRate             = 1e6;
+    p_ctx->pparams.ulClockRate             = CLOCK_FREQ;
     p_ctx->pparams.ulMaxDisplayDelay       = 4;
     p_ctx->pparams.ulMaxNumDecodeSurfaces  = p_ctx->i_nb_surface;
     p_ctx->pparams.pUserData               = p_dec;
