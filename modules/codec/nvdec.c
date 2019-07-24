@@ -207,6 +207,10 @@ static int DecodeBlock(decoder_t *p_dec, block_t *p_block)
     if (p_ctx->b_is_hxxx) {
         p_block = HXXXProcessBlock(p_dec, p_block);
     }
+    if ((p_block->i_flags & BLOCK_FLAG_INTERLACED_MASK) && p_ctx->b_progressive) {
+        p_ctx->b_progressive = 0;
+        p_ctx->deintMode = cudaVideoDeinterlaceMode_Adaptive;
+    }
     return CuvidPushBlock(p_dec, p_block);
 }
 
