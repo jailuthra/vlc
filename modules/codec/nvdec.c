@@ -246,7 +246,6 @@ static int OpenDecoder(vlc_object_t *p_this)
             break;
         case VLC_CODEC_VP8:
         case VLC_CODEC_VP9:
-            return VLC_SUCCESS;
         default:
             return VLC_EGENERIC;
     }
