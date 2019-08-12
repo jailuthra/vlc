@@ -48,6 +48,9 @@ typedef struct nvdec_ctx {
     cudaVideoDeinterlaceMode    deintMode;
 } nvdec_ctx_t;
 
+static int OpenDecoder(vlc_object_t *p_this);
+static void CloseDecoder(vlc_object_t *p_this);
+
 static inline int CudaCheck(decoder_t *p_dec, CUresult result, const char *psz_func)
 {
     if (unlikely(result != CUDA_SUCCESS)) {
@@ -245,12 +248,16 @@ static int OpenDecoder(vlc_object_t *p_this)
                              p_dec->fmt_in.i_codec, false);
             result = hxxx_helper_set_extra(&p_ctx->hh, p_dec->fmt_in.p_extra,
                                            p_dec->fmt_in.i_extra);
-            if (result != VLC_SUCCESS)
+            if (result != VLC_SUCCESS) {
+                hxxx_helper_clean(&p_ctx->hh);
+                free(p_ctx);
                 return result;
+            }
             break;
         case VLC_CODEC_VP8:
         case VLC_CODEC_VP9:
         default:
+            free(p_ctx);
             return VLC_EGENERIC;
     }
 
@@ -260,8 +267,11 @@ static int OpenDecoder(vlc_object_t *p_this)
     CUDA_CHECK(p_ctx->cudaFunctions->cuCtxCreate(&p_ctx->cuCtx, 0, 0));
 
     result = CUDA_CHECK(p_ctx->cudaFunctions->cuCtxPushCurrent(p_ctx->cuCtx));
-    if (result != VLC_SUCCESS)
+    if (result != VLC_SUCCESS) {
+        msg_Err(p_dec, "Unable to push CUDA context");
+        CloseDecoder(p_this);
         return result;
+    }
 
     CUVIDDECODECAPS caps = {0};
     caps.eCodecType         = MapCodecID(p_dec->fmt_in.i_codec);
@@ -270,6 +280,7 @@ static int OpenDecoder(vlc_object_t *p_this)
     result =  CUDA_CHECK(p_ctx->functions->cuvidGetDecoderCaps(&caps));
     if (result != VLC_SUCCESS || !caps.bIsSupported) {
         msg_Err(p_dec, "No hardware for NVDEC");
+        CloseDecoder(p_this);
         return VLC_EGENERIC;
     }
     CUDA_CHECK(p_ctx->cudaFunctions->cuCtxPopCurrent(NULL));
@@ -291,8 +302,11 @@ static int OpenDecoder(vlc_object_t *p_this)
     p_ctx->pparams.pfnDecodePicture        = HandlePictureDecode;
     p_ctx->pparams.pfnDisplayPicture       = HandlePictureDisplay;
     result = CUDA_CHECK(p_ctx->functions->cuvidCreateVideoParser(&p_ctx->cuparser, &p_ctx->pparams));
-    if (result != VLC_SUCCESS)
+    if (result != VLC_SUCCESS) {
+        msg_Err(p_dec, "Unable to create NVDEC video parser");
+        CloseDecoder(p_this);
         return result;
+    }
 
     return VLC_SUCCESS;
 }
