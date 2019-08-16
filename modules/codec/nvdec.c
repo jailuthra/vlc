@@ -200,12 +200,25 @@ static block_t * HXXXProcessBlock(decoder_t *p_dec, block_t *p_block)
     return p_ctx->hh.pf_process_block(&p_ctx->hh, p_block, NULL);
 }
 
+static int CuvidPushEOS(decoder_t *p_dec)
+{
+    nvdec_ctx_t *p_ctx = p_dec->p_sys;
+
+    CUVIDSOURCEDATAPACKET cupacket = {0};
+    cupacket.flags |= CUVID_PKT_ENDOFSTREAM;
+    cupacket.payload_size = 0;
+    cupacket.payload = NULL;
+    cupacket.timestamp = 0;
+
+    return CUDA_CALL(p_ctx->functions->cuvidParseVideoData(p_ctx->cuparser, &cupacket));
+}
+
 static int DecodeBlock(decoder_t *p_dec, block_t *p_block)
 {
     nvdec_ctx_t *p_ctx = p_dec->p_sys;
     if (p_block == NULL) {
-        // TODO flush
-        return VLCDEC_SUCCESS;
+        // Flush stream
+        return CuvidPushEOS(p_dec);
     }
     if (p_ctx->b_is_hxxx) {
         p_block = HXXXProcessBlock(p_dec, p_block);
