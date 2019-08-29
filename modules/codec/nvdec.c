@@ -47,6 +47,8 @@ typedef struct nvdec_ctx {
     bool                        b_xps_pushed; ///< (for xvcC) parameter sets pushed (SPS/PPS/VPS)
     bool                        b_progressive;
     cudaVideoDeinterlaceMode    deintMode;
+    // NVDEC doesn't stop even if HandleVideoSequence fails
+    bool                        b_nvparser_success;
 } nvdec_ctx_t;
 
 static int OpenDecoder(vlc_object_t *p_this);
@@ -103,8 +105,7 @@ static int UpdateOutputFormat(decoder_t *p_dec, CUVIDEOFORMAT *p_format)
     }
     p_dec->fmt_out.video.i_bits_per_pixel = i_bpp;
     p_dec->fmt_out.video.i_chroma = p_dec->fmt_out.i_codec = i_chroma;
-    decoder_UpdateVideoFormat(p_dec);
-    return VLC_SUCCESS;
+    return decoder_UpdateVideoFormat(p_dec);
 }
 
 static int MapSurfaceFmt(int i_vlc_fourcc)
@@ -112,8 +113,8 @@ static int MapSurfaceFmt(int i_vlc_fourcc)
     switch (i_vlc_fourcc) {
         case VLC_CODEC_NV12: return cudaVideoSurfaceFormat_NV12;
         case VLC_CODEC_I444: return cudaVideoSurfaceFormat_YUV444;
+        default:             vlc_assert_unreachable();
     }
-    vlc_assert_unreachable();
 }
 
 static int CUDAAPI HandleVideoSequence(void *p_opaque, CUVIDEOFORMAT *p_format)
@@ -125,7 +126,7 @@ static int CUDAAPI HandleVideoSequence(void *p_opaque, CUVIDEOFORMAT *p_format)
     // update vlc's output format using NVDEC parser's output
     ret = UpdateOutputFormat(p_dec, p_format);
     if (ret != VLC_SUCCESS)
-        return 0;
+        goto error;
 
     CUVIDDECODECREATEINFO dparams = {
         .ulWidth             = p_format->coded_width,
@@ -143,15 +144,17 @@ static int CUDAAPI HandleVideoSequence(void *p_opaque, CUVIDEOFORMAT *p_format)
 
     ret = CUDA_CALL(p_ctx->cudaFunctions->cuCtxPushCurrent(p_ctx->cuCtx));
     if (ret != VLC_SUCCESS)
-        return 0;
+        goto error;
 
-    /*if (p_ctx->cudecoder)
-        CUDA_CALL(p_ctx->functions->cuvidDestroyDecoder(p_ctx->cudecoder));*/
+    if (p_ctx->cudecoder)
+        CUDA_CALL(p_ctx->functions->cuvidDestroyDecoder(p_ctx->cudecoder));
 
     ret = CUDA_CALL(p_ctx->functions->cuvidCreateDecoder(&p_ctx->cudecoder, &dparams));
     CUDA_CALL(p_ctx->cudaFunctions->cuCtxPopCurrent(NULL));
-
     return (ret == VLC_SUCCESS);
+error:
+    p_ctx->b_nvparser_success = false;
+    return 0;
 }
 
 static int CUDAAPI HandlePictureDecode(void *p_opaque, CUVIDPICPARAMS *p_picparams)
@@ -226,10 +229,10 @@ static int CUDAAPI HandlePictureDisplay(void *p_opaque, CUVIDPARSERDISPINFO *p_d
     if (result != VLC_SUCCESS)
         goto error;
 
+    CUDA_CALL(p_ctx->cudaFunctions->cuCtxPopCurrent(NULL));
+
     // Push decoded frame to display queue
     decoder_QueueVideo(p_dec, p_pic);
-
-    CUDA_CALL(p_ctx->cudaFunctions->cuCtxPopCurrent(NULL));
     return 1;
 
 error:
@@ -288,6 +291,9 @@ static int CuvidPushEOS(decoder_t *p_dec)
 static int DecodeBlock(decoder_t *p_dec, block_t *p_block)
 {
     nvdec_ctx_t *p_ctx = p_dec->p_sys;
+    // If HandleVideoSequence fails, we give up decoding
+    if (!p_ctx->b_nvparser_success)
+        return VLCDEC_ECRITICAL;
     if (p_block == NULL) {
         // Flush stream
         return CuvidPushEOS(p_dec);
@@ -313,8 +319,8 @@ static int MapCodecID(int i_vlc_fourcc)
         case VLC_CODEC_HEVC: return cudaVideoCodec_HEVC;
         case VLC_CODEC_VP8:  return cudaVideoCodec_VP8;
         case VLC_CODEC_VP9:  return cudaVideoCodec_VP9;
+        default:             vlc_assert_unreachable();
     }
-    vlc_assert_unreachable();
 }
 
 static int OpenDecoder(vlc_object_t *p_this)
@@ -333,6 +339,7 @@ static int OpenDecoder(vlc_object_t *p_this)
         case VLC_CODEC_H264:
         case VLC_CODEC_HEVC:
             p_ctx->b_is_hxxx = true;
+            p_ctx->b_nvparser_success = true;
             p_ctx->i_nb_surface = MAX_HXXX_SURFACES;
             hxxx_helper_init(&p_ctx->hh, VLC_OBJECT(p_dec),
                              p_dec->fmt_in.i_codec, false);
@@ -372,10 +379,17 @@ static int OpenDecoder(vlc_object_t *p_this)
     if (result != VLC_SUCCESS)
         goto error;
 
+    uint8_t i_chroma_idc, i_depth_luma, i_depth_chroma;
+    result = hxxx_helper_get_chroma_chroma(&p_ctx->hh, &i_chroma_idc,
+                                           &i_depth_luma, &i_depth_chroma);
+    // FIXME: remove the bit depth check when 10/12-bit supported
+    if (result != VLC_SUCCESS || i_depth_luma > 8)
+        goto error;
+
     CUVIDDECODECAPS caps = {
         .eCodecType         = MapCodecID(p_dec->fmt_in.i_codec),
-        .eChromaFormat      = cudaVideoChromaFormat_420,
-        .nBitDepthMinus8    = 0    // FIXME: hardcoded to 8-bit for now
+        .eChromaFormat      = i_chroma_idc,
+        .nBitDepthMinus8    = i_depth_luma - 8
     };
 
     result = CUDA_CALL(p_ctx->cudaFunctions->cuCtxPushCurrent(p_ctx->cuCtx));
